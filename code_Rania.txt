@@ -1,0 +1,192 @@
+
+                  
+```{r}
+library(httr)
+library(jsonlite)
+library(rjson)
+library(dplyr)
+# Pour la representation graphique
+library(leaflet)
+library(plotly)
+library(DT)
+library(shiny)
+library(shinythemes)
+library(shinydashboard)
+
+```
+
+```{r}
+load_covid_reports <- function(base_path = "covid_data") {
+  csv_files <- list.files(base_path, pattern = "\\.csv$", full.names = TRUE)
+  message(sprintf("Found %d CSV files in the folder", length(csv_files)))
+  covid_data_list <- lapply(csv_files, function(file_path) {
+    read.csv(file_path)
+  })
+  
+  # Combinaison de tous les data.frames en un seul data.frame 
+  combined_covid_data <- bind_rows(covid_data_list, .id = "source_file")
+  
+  message("All data loaded and combined into a single data frame.")
+  
+  return(combined_covid_data)
+}
+base_path <- "covid_data"  # Dossier contenant vos fichiers CSV téléchargés
+combined_data <- load_covid_reports(base_path)
+
+# Voir un aperçu des données combinées
+head(combined_data)
+```
+
+
+```{r}
+eu_countries <- c(
+  "Austria", "Belgium", "Bulgaria", "Croatia", "Cyprus", "Czech Republic", "Denmark", "Estonia", 
+  "Finland", "France", "Germany", "Greece", "Hungary", "Iceland", "Ireland", "Italy", "Latvia", 
+  "Lithuania", "Luxembourg", "Malta", "Netherlands", "Poland", "Portugal", "Romania", "Slovakia", 
+  "Slovenia", "Spain", "Sweden"
+)
+```
+
+
+```{r}
+filtered_data <- reactive({
+  data_for_dashboard <- combined_data %>%
+    filter(Country_Region %in% eu_countries) %>%  
+    select(Country_Region, Last_Update, Confirmed, Deaths, Recovered, Lat, Long_) %>%  
+    mutate(
+      Last_Update = as.Date(Last_Update),  
+      Confirmed = as.numeric(Confirmed),  
+      Deaths = as.numeric(Deaths),  
+      Recovered = as.numeric(Recovered),  
+      Lat = as.numeric(Lat),  
+      Long_ = as.numeric(Long_)  
+    ) %>%
+    na.omit()
+  
+  if (input$country_filter != "All") {
+    data_for_dashboard <- data_for_dashboard %>% filter(Country_Region == input$country_filter)
+  }
+  
+  return(data_for_dashboard)
+})
+```
+```{r}
+ui <- dashboardPage(
+  dashboardHeader(title = "COVID-19 Dashboard"),
+  dashboardSidebar(
+    sidebarMenu(
+      menuItem("Map", tabName = "map_tab", icon = icon("globe")),
+      menuItem("Evolution", tabName = "evolution_tab", icon = icon("chart-line")),
+      menuItem("Data", tabName = "data_tab", icon = icon("table")),
+      selectInput("country_filter", "Select Country", 
+                  choices = c("All", eu_countries), selected = "All")
+    )
+  ),
+  dashboardBody(
+    tabItems(
+      # Carte
+      tabItem(tabName = "map_tab",
+              leafletOutput("map", width = "100%", height = 500),
+              br(),
+              helpText("Choropleth map showing COVID-19 deaths in the EU.")
+      ),
+      # Graphique de l'évolution
+      tabItem(tabName = "evolution_tab",
+              plotlyOutput("evolution_plot"),
+              br(),
+              helpText("Time series showing the evolution of COVID-19 cases.")
+      ),
+      # Tableau des données
+      tabItem(tabName = "data_tab",
+              DTOutput("data_table"),
+              br(),
+              helpText("Detailed COVID-19 data.")
+      )
+    )
+  )
+)
+```
+             
+```{r}
+server <- function(input, output) {
+  
+  # Déplacer la logique réactive dans le serveur
+  filtered_data <- reactive({
+    data_for_dashboard <- combined_data %>%
+      filter(Country_Region %in% eu_countries) %>%  
+      select(Country_Region, Last_Update, Confirmed, Deaths, Recovered, Lat, Long_) %>%  
+      mutate(
+        Last_Update = as.Date(Last_Update),  
+        Confirmed = as.numeric(Confirmed),  
+        Deaths = as.numeric(Deaths),  
+        Recovered = as.numeric(Recovered),  
+        Lat = as.numeric(Lat),  
+        Long_ = as.numeric(Long_)  
+      ) %>%
+      na.omit()
+    
+    if (input$country_filter != "All") {
+      data_for_dashboard <- data_for_dashboard %>% filter(Country_Region == input$country_filter)
+    }
+    
+    return(data_for_dashboard)
+  })
+
+  # Carte interactive 
+  output$map <- renderLeaflet({
+    data <- filtered_data()
+    pal <- colorNumeric(palette = "YlOrRd", domain = data$Deaths) 
+    leaflet(data) %>%
+      addTiles() %>%
+      addCircleMarkers(
+        lng = ~Long_, lat = ~Lat,
+        radius = 5,  
+        color = ~pal(Deaths), 
+        stroke = FALSE, fillOpacity = 0.8,
+        popup = ~paste(
+          "<strong>", Country_Region, "</strong><br>",
+          "Confirmed: ", Confirmed, "<br>",
+          "Deaths: ", Deaths, "<br>",
+          "Recovered: ", Recovered
+        ),
+        clusterOptions = markerClusterOptions()  # Utilisation des clusters
+      ) %>%
+      addLegend("bottomright", pal = pal, values = ~Deaths,
+                title = "COVID-19 Deaths",
+                opacity = 0.7)
+  })
+  
+  # Graphique interactif de l'évolution des cas
+  output$evolution_plot <- renderPlotly({
+    data <- filtered_data()
+    
+    grouped_data <- data %>%
+      group_by(Last_Update) %>%
+      summarise(
+        Confirmed = sum(Confirmed, na.rm = TRUE),
+        Deaths = sum(Deaths, na.rm = TRUE),
+        Recovered = sum(Recovered, na.rm = TRUE)
+      )
+    
+    plot_ly(grouped_data, x = ~Last_Update) %>%
+      add_trace(y = ~Confirmed, type = 'scatter', mode = 'lines', name = 'Confirmed', line = list(color = 'blue')) %>%
+      add_trace(y = ~Deaths, type = 'scatter', mode = 'lines', name = 'Deaths', line = list(color = 'red')) %>%
+      add_trace(y = ~Recovered, type = 'scatter', mode = 'lines', name = 'Recovered', line = list(color = 'green')) %>%
+      layout(title = "Evolution of COVID-19 Cases",
+             xaxis = list(title = "Date"),
+             yaxis = list(title = "Number of Cases"))
+  })
+  
+  # Tableau des données
+  output$data_table <- renderDT({
+    datatable(filtered_data(), options = list(pageLength = 10), rownames = FALSE)
+  })
+}
+
+
+```
+           
+```{r}
+shinyApp(ui = ui, server = server)
+```
+
